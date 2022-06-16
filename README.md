@@ -1,3 +1,1 @@
-# Distributed Elixir on Kubernetes
-
-Notes on setup a local kubernetes cluster with redis sentinel and a pair of distributed elixir clients.
+repository to ease play with kubernetes and elixir locally with kind.
