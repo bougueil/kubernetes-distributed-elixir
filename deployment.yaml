@@ -1,0 +1,81 @@
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  # namespace: maquette
+  name: pod-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "watch", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods
+  # namespace: maquette
+subjects:
+- kind: ServiceAccount
+  name: default
+roleRef:
+  kind: Role
+  name: pod-reader
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shoutbox
+  # namespace: maquette
+spec:
+  selector:
+    matchLabels:
+      app: shoutbox
+  replicas: 2
+  template:
+    metadata:
+      labels:
+        app: shoutbox
+    spec:
+      containers:
+      - name: shoutbox
+        image: shoutbox:latest
+        imagePullPolicy: Never
+        ports:
+        - containerPort: 4000
+        env:
+        - name: SECRET_KEY_BASE
+          value: "T/y+hmDVluJt8pN5vFPrmrWql6wL9fzy0h5g7gAwmZZTFOWiED1H+U6L7UEVEMrR"
+        - name: PORT
+          value: "4000"
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shoutbox
+  # namespace: maquette
+spec:
+  selector:
+    app: shoutbox
+  ports:
+    - port: 4000
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: default-ingress
+  # namespace: maquette
+spec:
+  defaultBackend:
+    service:
+      name: shoutbox
+      port:
+        number: 4000

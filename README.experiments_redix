@@ -1,0 +1,187 @@
+Redis version=6.2.5
+kubectlget svc
+redis-redis-ha-announce-0   ClusterIP   10.96.104.226   <none>        6379/TCP,26379/TCP   61m
+redis-redis-ha-announce-1   ClusterIP   10.96.103.128   <none>        6379/TCP,26379/TCP   61m
+redis-redis-ha-announce-2   ClusterIP   10.96.241.109   <none>        6379/TCP,26379/TCP   61m
+then add these names in sentinel list
+
+
+KEYS *
+FLUSHDB # delete all keys
+DBSIZE # number of keys
+GET "item:5"
+
+ELIXIR
+:inet.getaddrs 'redis-redis-ha.default.svc.cluster.local', :inet
+{:ok, [{10, 244, 2, 2}, {10, 244, 3, 4}, {10, 244, 1, 4}]}
+
+
+EXPERIMENT
+on node1_elixir run commands 1_000 sets of commands :
+  def commands(n) do
+    Enum.reduce(1..n, fn i,_ ->
+      Redix.Command.execute ["SET", "item:#{i}", "100"]
+      Redix.Command.execute ["INCR", "item:#{i}"]
+      Redix.Command.execute ["APPEND", "item:#{i}", "xxx"]
+      Redix.Command.execute ["GET", "item:#{i}"]
+      IO.puts "\r#{i}"
+      Process.sleep(20)
+    end)
+  end
+
+
+we observe the logs :
+2022-06-07 12:38:12.471690Z 2
+2022-06-07 12:38:12.492912Z 3
+2022-06-07 12:38:12.514436Z 4
+2022-06-07 12:38:12.536410Z 5
+...
+2022-06-07 12:38:13.200108Z 36
+2022-06-07 12:38:13.221060Z 37
+2022-06-07 12:38:13.242452Z 38
+
+WE KILL THE NODE SUPPORTING the poolboy connections
+kubectl delete pod redis-redis-ha-server-1
+kubectl drain kind-worker --delete-emptydir-data   --ignore-daemonsets 
+
+[REDIS] Command ["SET", "item:39", "100"] failed, reason {:error, %Redix.ConnectionError{reason: :disconnected}}
+[REDIS] Command ["INCR", "item:39"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+[REDIS] Command ["APPEND", "item:39", "xxx"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+[REDIS] Command ["GET", "item:39"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+2022-06-07 12:38:13.265397Z 39
+[REDIS] Command ["SET", "item:40", "100"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+...
+
+2022-06-07 12:38:29.565417Z 790
+[REDIS] Command ["SET", "item:791", "100"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+[REDIS] Command ["INCR", "item:791"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+[REDIS] Command ["APPEND", "item:791", "xxx"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+[REDIS] Command ["GET", "item:791"] failed, reason {:error, %Redix.ConnectionError{reason: :closed}}
+2022-06-07 12:38:29.588651Z 791
+2022-06-07 12:38:29.610267Z 792
+...
+2022-06-07 12:38:34.352439Z 999
+2022-06-07 12:38:34.376406Z 1000
+
+we observe the poolboy workers are attached to redis-redis-ha-server-2
+there has been 246 keys written for a total of 1000 keys.
+that is 1000 - 792 + 38
+
+on the other node (elixir)
+Redix.Command.execute ["DBSIZE"]
+{:ok, 246}
+
+
+sentinel are working fine, after  29 - 13 = 15 s.
+the poolboy is reconfigured with the proper master node
+DO WE HAVE 2 RO NODEs and a RW Master Node ?
+
+both sentinel & redis have timeouts = 15s
+   Liveness:       exec [sh -c /health/sentinel_liveness.sh] delay=30s timeout=15s period=15s #success=1 #failure=5
+   Readiness:      exec [sh -c /health/sentinel_liveness.sh] delay=30s timeout=15s period=15s #success=3 #failure=5
+same in dev
+
+
+LOCAL versus DEV
+no significant difference on conf for redis and indo displayed with redis-client
+except the Modules and OS version
+ON DEV we have these loaded modules : 
+
+# Modules
+module:name=netcom-queue,ver=1,api=1,filters=0,usedby=[],using=[],options=[]
+module:name=graph,ver=20414,api=1,filters=0,usedby=[],using=[],options=[]
+
+5.15.0-33-generic LOCAL
+5.13.0-1017-azure
+
+sysctl
+net.ipv6.conf.all.disable_ipv6 = 0 LOCAL (enable IPV6)
+user.max_inotify_instances = 512 (dev 128)
+net.netfilter.nf_conntrack_expect_max 4096 (dev 1024)
+IPV6 yes Locql
+
+ip link same mtu LOCAL DEV
+
+
+KUBERNETES NETWORK DIFF
+LOCAL
+
+kubectl get service --all-namespaces
+NAMESPACE     NAME                        TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)                  AGE
+default       kubernetes                  ClusterIP   10.96.0.1       <none>        443/TCP                  84m
+default       redis-redis-ha              ClusterIP   None            <none>        6379/TCP,26379/TCP       83m
+default       redis-redis-ha-announce-0   ClusterIP   10.96.25.59     <none>        6379/TCP,26379/TCP       83m
+default       redis-redis-ha-announce-1   ClusterIP   10.96.231.225   <none>        6379/TCP,26379/TCP       83m
+default       redis-redis-ha-announce-2   ClusterIP   10.96.36.65     <none>        6379/TCP,26379/TCP       83m
+kube-system   kube-dns                    ClusterIP   10.96.0.10      <none>        53/UDP,53/TCP,9153/TCP   84m
+
+kubectl get pod -o wide (internal IP)
+NAME                      READY   STATUS    RESTARTS   AGE   IP           NODE           NOMINATED NODE   READINESS GATES
+redis-redis-ha-server-0   3/3     Running   0          82m   10.244.2.2   kind-worker    <none>           <none>
+redis-redis-ha-server-1   3/3     Running   0          80m   10.244.3.2   kind-worker3   <none>           <none>
+redis-redis-ha-server-2   3/3     Running   0          79m   10.244.1.2   kind-worker2   <none>           <none>
+
+
+kubectl -n kube-system edit configmap coredns
+
+apiVersion: v1
+data:
+  Corefile: |
+    .:53 {
+        errors
+        health {
+           lameduck 5s
+        }
+        ready
+        kubernetes cluster.local in-addr.arpa ip6.arpa {
+           pods insecure
+           fallthrough in-addr.arpa ip6.arpa
+           ttl 30
+        }
+        prometheus :9153
+        forward . /etc/resolv.conf {
+           max_concurrent 1000
+        }
+        cache 30
+        loop
+        reload
+        loadbalance
+    }
+kind: ConfigMap
+metadata:
+  creationTimestamp: "2022-06-08T12:13:57Z"
+  name: coredns
+  namespace: kube-system
+  resourceVersion: "236"
+  uid: 651b73d3-caeb-4067-8b57-2396a1e680d1
+
+
+kubectl describe clusterrole system:coredns -n kube-system
+Name:         system:coredns
+Labels:       <none>
+Annotations:  <none>
+PolicyRule:
+  Resources                        Non-Resource URLs  Resource Names  Verbs
+  ---------                        -----------------  --------------  -----
+  nodes                            []                 []              [get]
+  endpoints                        []                 []              [list watch]
+  namespaces                       []                 []              [list watch]
+  pods                             []                 []              [list watch]
+  services                         []                 []              [list watch]
+  endpointslices.discovery.k8s.io  []                 []              [list watch]
+
+ip addr
+1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536 qdisc noqueue state UNKNOWN qlen 1000
+    link/loopback 00:00:00:00:00:00 brd 00:00:00:00:00:00
+    inet 127.0.0.1/8 scope host lo
+       valid_lft forever preferred_lft forever
+    inet6 ::1/128 scope host 
+       valid_lft forever preferred_lft forever
+2: eth0@eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP 
+    link/ether 3e:0a:07:e1:92:04 brd ff:ff:ff:ff:ff:ff
+    inet 10.244.2.2/24 brd 10.244.2.255 scope global eth0
+       valid_lft forever preferred_lft forever
+    inet6 fe80::3c0a:7ff:fee1:9204/64 scope link 
+       valid_lft forever preferred_lft forever
+
+
